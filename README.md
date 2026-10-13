@@ -29,7 +29,36 @@ Every notebook starts with one cell (Colab starts a fresh machine each session):
 On a laptop, install once into your environment (`pip install -q git+https://github.com/paulsavala/pandora-tools.git`),
 then just `import pandora_tools` in any notebook.
 
-## Finding data
+## The client: `PandoraClient`
+
+`PandoraClient` talks to the PGN data API: it finds sites, instruments and
+products, and downloads files into a local cache. Anything that downloads data
+returns `PandoraFrame`s (see below).
+
+```python
+client = pdt.PandoraClient()                             # all defaults
+client = pdt.PandoraClient(tz="America/Denver", verbose=False)
+```
+
+| Option | Default | What it does |
+|---|---|---|
+| `cache_dir` | chosen automatically | folder for downloaded files (see [Where downloaded files go](#where-downloaded-files-go)) |
+| `tz` | `"America/Chicago"` | time zone of the `local_time` column; `None` to skip it |
+| `mask_missing` | `True` | turn documented missing-value codes into NaN (`False` keeps raw values) |
+| `verbose` | `True` | print short progress lines (files downloaded vs. taken from the cache) |
+| `timeout`, `retries` | `60`, `3` | seconds per request, and attempts before giving up on a slow API |
+
+**Dates.** Every method that takes dates accepts `"2026-08-28"`, a `datetime.date`
+or a pandas `Timestamp`. A date selects the daily file with that date in its name,
+and `end` is inclusive (`end=None` means just `start`). Times inside the data are
+UTC, so a file's evening measurements can have a `utc_time` on the next date
+(`local_time` stays on the file's date).
+
+**Locations** are the PGN short names (`"AustinTX"`, `"HoustonTX"`). Matching is
+case-insensitive and old names (aliases) are accepted. An unknown name raises an
+error that suggests similar names.
+
+### Finding data
 
 ```python
 client.find_locations("TX")                              # name search
@@ -40,8 +69,38 @@ client.catalog(["AustinTX", "HoustonTX"], "2026-08-01", "2026-08-31")
 client.list_files("AustinTX", 257, "2026-08-28", product="rnvh3")
 ```
 
-Dates are **UTC days** and `end` is inclusive. A local (CDT) day spans two UTC
-files, so for a full local day fetch that day and the next and filter on `local_time`.
+| Method | Returns |
+|---|---|
+| `locations()` | every PGN site: `name`, `long_name`, `lat`, `lon`, `alt`, `aliases` |
+| `find_locations(query=None, near=None, radius_km=None)` | sites whose name or long name contains `query`, and/or within `radius_km` of `near=(lat, lon)`; with `near`, adds `distance_km` and sorts nearest first |
+| `resolve_location(name)` | the official short name for `name` (handles case and aliases) |
+| `instruments(location)` | Pandora instrument numbers at the site, e.g. `[257]` |
+| `spectrometers(location, instrument)` | spectrometer numbers, usually `[1]` |
+| `levels(location, instrument, spectrometer=1)` | processing levels available, e.g. `["L0", "L1", "L2Fit", "L2"]`; this package reads `L2` |
+| `products(location, instrument, start, end=None, spectrometer=1)` | one row per product code: `description`, `n_days` with data, `first_date`, `last_date` |
+| `catalog(locations, start, end=None)` | the same as `products`, for one or several sites and every instrument/spectrometer there (several API calls per site, so keep the list short) |
+| `list_files(location, instrument, start, end=None, product=None, spectrometer=1, latest_only=True)` | one row per daily file: `filename`, `product`, `date`, `size`, `modified_time`, ... If PGN reissued a day, only the newest file is kept unless `latest_only=False` |
+
+Product descriptions come from a table anyone can edit (see
+[Product descriptions](#product-descriptions)). Products not in it show an empty description.
+
+### Downloading and reading
+
+```python
+no2 = client.fetch("AustinTX", 257, "2026-08-28", products="rnvh3")              # one product
+no2, hcho = client.fetch("AustinTX", 257, "2026-08-28", products=["rnvh3", "rfuh5"])
+week = client.fetch("AustinTX", 257, "2026-08-01", "2026-08-07", products="rfuh5")   # date range
+
+paths = client.download(client.list_files("AustinTX", 257, "2026-08-28"))      # files only
+df = client.read(paths[0])                                                    # read with the client's tz / mask_missing
+```
+
+| Method | What it does |
+|---|---|
+| `fetch(location, instrument, start, end=None, products=("rnvh3", "rfuh5"), spectrometer=1, refresh=False)` | lists, downloads and reads in one step. One product code gives one `PandoraFrame`; a list gives a tuple of frames in the same order, each covering every day in the range. If a product has no files in the range, the error lists the products that do. |
+| `download(files, refresh=False)` | downloads a `list_files` result, a list of filenames or one filename into the cache, and returns the local paths. Files already in the cache are reused unless `refresh=True`. |
+| `read(path, **kwargs)` | `pdt.read` using the client's `tz` and `mask_missing` |
+| `local_path(filename)` | where a file is (or would be) stored in the cache |
 
 ## Reading local files
 
